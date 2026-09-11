@@ -200,23 +200,9 @@ def save_extraction(
         )
         for table in extracted.tables
     )
-    # Batched, and tolerant per batch: whatever fails comes back as None, so a
-    # bad request costs those chunks only. The document still ingests and stays
-    # keyword-searchable; scripts.backfill_embeddings repairs the gaps.
-    vectors = embedder.embed_documents([chunk.content for chunk in chunks])
-    if vectors is None:
-        vectors = [None] * len(chunks)
-
-    missing = sum(1 for vector in vectors if vector is None)
-    if missing:
-        logger.warning(
-            "%d of %d chunk(s) of %s have no embedding - semantic search will skip "
-            "them until 'python -m scripts.backfill_embeddings' is run.",
-            missing,
-            len(chunks),
-            document.filename,
-        )
-
+    # Chunks are saved immediately with embedding=None so the upload response
+    # is not blocked by HuggingFace API calls. The controller schedules
+    # backfill_document_embeddings() as a BackgroundTask to fill them in.
     db.add_all(
         DocumentChunk(
             document_id=document.id,
@@ -227,16 +213,69 @@ def save_extraction(
             page_end=chunk.page_end,
             char_count=chunk.char_count,
             token_estimate=chunk.token_estimate,
-            embedding=(
-                _encode_vector(vectors[index]) if vectors[index] is not None else None
-            ),
+            embedding=None,  # filled in by backfill_document_embeddings
         )
-        for index, chunk in enumerate(chunks)
+        for chunk in chunks
     )
 
     db.commit()
     db.refresh(document)
     return document
+
+
+def backfill_document_embeddings(db: Session, document_id: int) -> None:
+    """Embed every unembedded chunk for *document_id* and persist the vectors.
+
+    Called from a FastAPI BackgroundTask after the upload response is sent, so
+    the HuggingFace round-trips never block the HTTP request.
+    """
+    chunk_rows = db.scalars(
+        select(DocumentChunk)
+        .where(
+            DocumentChunk.document_id == document_id,
+            DocumentChunk.embedding.is_(None),
+        )
+        .order_by(DocumentChunk.chunk_index)
+    ).all()
+
+    if not chunk_rows:
+        logger.info("No unembedded chunks for document %d.", document_id)
+        return
+
+    texts = [row.content for row in chunk_rows]
+    vectors = embedder.embed_documents(texts)
+
+    if vectors is None:
+        # Embeddings are disabled or HF_TOKEN is missing — skip silently.
+        logger.debug(
+            "Embeddings unavailable; skipping background embed for document %d.",
+            document_id,
+        )
+        return
+
+    missing = 0
+    for row, vector in zip(chunk_rows, vectors):
+        if vector is not None:
+            row.embedding = _encode_vector(vector)
+        else:
+            missing += 1
+
+    db.commit()
+
+    embedded = len(chunk_rows) - missing
+    logger.info(
+        "Background embed: %d/%d chunk(s) embedded for document %d.",
+        embedded,
+        len(chunk_rows),
+        document_id,
+    )
+    if missing:
+        logger.warning(
+            "%d chunk(s) of document %d have no embedding — run "
+            "'python -m scripts.backfill_embeddings' to repair.",
+            missing,
+            document_id,
+        )
 
 
 def mark_failed(db: Session, document: Document, message: str) -> Document:

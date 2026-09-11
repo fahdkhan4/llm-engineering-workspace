@@ -9,11 +9,13 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database.models import Document, DocumentStatus
+from database.session import get_db
 from helper.chunker import build_chunks
 from helper.document_extraction import extract_document
-from helper.file_utils import detect_file_type, sha256_hex, stored_filename
+from helper.file_utils import UnsupportedFileType, detect_file_type, sha256_hex, stored_filename
 from llm.llm_client import summarise_document
 from repository import document_repository as repository
+from repository.document_repository import backfill_document_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,28 @@ def ingest(db: Session, filename: str, data: bytes) -> tuple[Document, dict, boo
 
     _summarise(db, document, extracted)
     return document, repository.counts(db, document.id), False
+
+
+def embed_document(document_id: int) -> None:
+    """Embed all unembedded chunks for *document_id*.
+
+    Designed to run as a FastAPI BackgroundTask after the upload response
+    has already been sent. Opens its own DB session so the request session
+    is not shared across threads.
+    """
+    db_gen = get_db()
+    db = next(db_gen)
+    try:
+        backfill_document_embeddings(db, document_id)
+    except Exception:
+        logger.warning(
+            "Background embedding failed for document %d.", document_id, exc_info=True
+        )
+    finally:
+        try:
+            next(db_gen)  # triggers the generator's finally / session.close()
+        except StopIteration:
+            pass
 
 
 def _summarise(db: Session, document: Document, extracted) -> None:

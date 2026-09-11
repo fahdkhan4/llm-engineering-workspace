@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 _QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 # The provider is called over the network, so texts go up in batches.
-_BATCH_SIZE = 32
+_BATCH_SIZE = 128
 _TIMEOUT_SECONDS = 60
 # Batches are network-bound, not CPU-bound, so they overlap. A 500-chunk
 # document is 16 round trips: sequentially that is ~25s of an upload spent
