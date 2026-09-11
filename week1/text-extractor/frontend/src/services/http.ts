@@ -47,7 +47,7 @@ interface RequestOptions {
   signal?: AbortSignal
 }
 
-function buildUrl(path: string, query?: Record<string, QueryValue>): string {
+export function buildUrl(path: string, query?: Record<string, QueryValue>): string {
   const url = `${BASE_URL}${path}`
   if (!query) return url
 
@@ -62,7 +62,7 @@ function buildUrl(path: string, query?: Record<string, QueryValue>): string {
 }
 
 /** FastAPI returns `{detail: string}` or `{detail: [{msg, loc}, ...]}`. */
-async function readErrorDetail(response: Response): Promise<string> {
+export async function readErrorDetail(response: Response): Promise<string> {
   let payload: unknown
   try {
     payload = await response.json()

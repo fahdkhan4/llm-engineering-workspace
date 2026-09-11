@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "FastAPI Debug",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "cwd": "${workspaceFolder}/text-extractor",
+            "args": [
+                "main:app"
+            ],
+            "envFile": "${workspaceFolder}/text-extractor/.env",
+            "jinja": true
+        }
+    ]
+}

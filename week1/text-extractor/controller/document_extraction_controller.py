@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -21,6 +22,7 @@ from service.document_service import (
     EmptyUpload,
     ExtractionFailed,
     delete as delete_document,
+    embed_document,
     ingest,
 )
 
@@ -32,16 +34,21 @@ _READ_CHUNK = 1024 * 1024
 @router.post("/", response_model=UploadResponse)
 async def _extract_document_details(
     file: UploadFile = File(..., description="A PDF or Word (.docx) document"),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
 ):
-    """Extract everything from an uploaded document and store it in SQLite."""
+    """Extract everything from an uploaded document and store it in SQLite.
+
+    Text extraction and chunking happen synchronously so the response carries
+    accurate counts. Embedding is deferred to a BackgroundTask so the caller
+    does not wait for HuggingFace API round-trips.
+    """
     data = await _read_upload(file)
 
     try:
-        # `ingest` is fully synchronous - PDF parsing plus embedding and summary
-        # calls, tens of seconds on a long document. Awaiting it on the event
-        # loop froze every other request for the duration, health checks and
-        # chat included, so it runs on a worker thread instead.
+        # `ingest` is fully synchronous - PDF parsing, chunking and summary
+        # calls. Awaiting it on the event loop froze every other request for
+        # the duration, so it runs on a worker thread instead.
         document, counts, already_processed = await run_in_threadpool(
             ingest, db, file.filename or "document", data
         )
@@ -53,6 +60,12 @@ async def _extract_document_details(
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, str(exc)) from exc
     except ExtractionFailed as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    # Schedule embedding AFTER the response is sent — the user gets their
+    # response immediately; semantic search becomes available a few seconds
+    # later once the background task finishes.
+    if not already_processed:
+        background_tasks.add_task(embed_document, document.id)
 
     return UploadResponse(
         document=DocumentDetail.model_validate(document),
@@ -79,6 +92,31 @@ def _ask_questions(
         document_id=document_id,
         session_key=session_key,
         top_k=top_k,
+    )
+
+
+@router.post("/ask/stream")
+@router.get("/stream")
+def _ask_stream(
+    question: str = Query(..., min_length=1, max_length=2000),
+    document_id: int | None = Query(None, description="Limit the answer to one document"),
+    session_key: str | None = Query(None, description="Chat thread to continue"),
+    top_k: int | None = Query(None, ge=1, le=20),
+    db: Session = Depends(get_db),
+):
+    """Stream an answer as Server-Sent Events for lower perceived latency."""
+    if document_id is not None and repository.get(db, document_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
+
+    return StreamingResponse(
+        qa_service.ask_stream(
+            db,
+            question=question,
+            document_id=document_id,
+            session_key=session_key,
+            top_k=top_k,
+        ),
+        media_type="text/event-stream",
     )
 
 

@@ -76,7 +76,10 @@ _FTS_STATEMENTS = [
 ]
 
 # Nullable columns added after the first release: (table, column, type).
-_ADDED_COLUMNS = [("documents", "summary", "TEXT")]
+_ADDED_COLUMNS = [
+    ("documents", "summary", "TEXT"),
+    ("chat_messages", "token_count", "INTEGER DEFAULT 0"),
+]
 
 # Set by init_db(); the retrieval layer falls back to LIKE when FTS5 is missing.
 fts_enabled = False

@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     # CORS (frontend origins)
     cors_origins: list[str] = ["*"]
 
+    # LLM model tiering
+    # Flagship model for answer generation (grounded QA)
+    main_model: str = "openai/gpt-oss-120b"
+    # Lightweight model for rewrites, summaries and other simple tasks
+    fast_model: str = "llama-3.1-8b-instant"
+    # Hard session limits
+    max_session_turns: int = 30
+    max_session_tokens: int = 50_000
+
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024

@@ -21,6 +21,9 @@ from openai import OpenAI, OpenAIError
 import logging
 import os
 import textwrap
+import json
+
+from config import settings
 
 load_dotenv()
 
@@ -28,7 +31,12 @@ logger = logging.getLogger(__name__)
 
 # Groq speaks the OpenAI wire protocol, so the OpenAI SDK talks to it unchanged.
 _BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+_MODEL = os.getenv("GROQ_MODEL", settings.main_model)
+_FAST_MODEL = os.getenv("GROQ_FAST_MODEL", settings.fast_model)
+
+FALLBACK_ANSWER = (
+    "I could not find enough relevant information in the documents to answer that."
+)
 
 
 _SYSTEM_PROMPT = textwrap.dedent("""\
@@ -182,7 +190,7 @@ def _client() -> OpenAI:
         raise LLMNotConfigured(
             "GROQ_API_KEY is not set. Add it to text-extractor/.env."
         )
-    return OpenAI(base_url=_BASE_URL, api_key=api_key)
+    return OpenAI(base_url=_BASE_URL, api_key=api_key, timeout=30.0, max_retries=3)
 
 def answer_question(
     question: str,
@@ -192,8 +200,10 @@ def answer_question(
     logger.debug("I am in the llm generation phase")
     messages = [
         {"role": "system", "content": _system_prompt_answer_generating()},
+        {"role": "user", "content": f"### Retrieved Contexts\n{build_context_block(contexts)}"},
+        {"role": "assistant", "content": "I have read the sources and will answer only from them."},
         *_history_messages(history),
-        {"role": "user", "content": _user_prompt(question, contexts)},
+        {"role": "user", "content": question},
     ]
 
     try:
@@ -201,14 +211,16 @@ def answer_question(
             model=_MODEL,
             messages=messages,
             temperature=0,  # grounded extraction, not creative writing
+            max_tokens=800,
         )
     except OpenAIError as exc:
         logger.exception("LLM request failed")
         raise LLMNotConfigured(f"The LLM request failed: {exc}") from exc
 
     message = response.choices[0].message
+    content = (message.content or "").strip()
     return LLMAnswer(
-        answer=(message.content or "").strip(),
+        answer=content if content else FALLBACK_ANSWER,
         model=response.model,
         usage=response.usage.model_dump() if response.usage else {},
     )
@@ -218,7 +230,7 @@ def answer_question(
 # Follow-up handling
 # --------------------------------------------------------------------------- #
 
-_REWRITE_MODEL = os.getenv("GROQ_REWRITE_MODEL", _MODEL)
+_REWRITE_MODEL = os.getenv("GROQ_REWRITE_MODEL", _FAST_MODEL)
 _REWRITE_MAX_CHARS = 300
 _REWRITE_HISTORY_TURNS = 6
 _REWRITE_TURN_CHARS = 600
@@ -333,7 +345,7 @@ def summarise_document(
     header = f"Title: {title or 'unknown'}\nPages: {page_count or 'unknown'}"
     try:
         response = _client().chat.completions.create(
-            model=_MODEL,
+            model=_FAST_MODEL,
             messages=[
                 {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
                 {"role": "user", "content": f"{header}\n\n### Excerpt\n{excerpt}"},
@@ -347,3 +359,69 @@ def summarise_document(
         return None
 
     return summary or None
+
+
+# --------------------------------------------------------------------------- #
+# Streaming support
+# --------------------------------------------------------------------------- #
+
+
+def stream_answer_question(
+    question: str,
+    contexts: list[RetrievedContext],
+    history: list[HistoryTurn],
+):
+    """Yield token chunks from a streaming LLM completion.
+
+    Yields JSON-encoded strings suitable for Server-Sent Events.
+    The first event carries source metadata; subsequent events carry answer
+    chunks; the final event carries usage statistics.
+    """
+    messages = [
+        {"role": "system", "content": _system_prompt_answer_generating()},
+        {"role": "user", "content": f"### Retrieved Contexts\n{build_context_block(contexts)}"},
+        {"role": "assistant", "content": "I have read the sources and will answer only from them."},
+        *_history_messages(history),
+        {"role": "user", "content": question},
+    ]
+
+    try:
+        stream = _client().chat.completions.create(
+            model=_MODEL,
+            messages=messages,
+            temperature=0,
+            max_tokens=800,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+    except OpenAIError as exc:
+        logger.exception("LLM streaming request failed")
+        yield json.dumps({"error": str(exc)})
+        return
+
+    collected = []
+    model_name = None
+    usage_data = {}
+
+    for chunk in stream:
+        if not model_name and chunk.model:
+            model_name = chunk.model
+
+        if chunk.usage:
+            usage_data = chunk.usage.model_dump() if hasattr(chunk.usage, 'model_dump') else {}
+
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                collected.append(delta.content)
+                yield json.dumps({"chunk": delta.content})
+
+    full_answer = "".join(collected).strip()
+    if not full_answer:
+        yield json.dumps({"chunk": FALLBACK_ANSWER})
+
+    yield json.dumps({
+        "done": True,
+        "model": model_name,
+        "usage": usage_data,
+    })

@@ -21,6 +21,8 @@ export interface ChatMessage {
   llmConfigured?: boolean
   /** Set when the request failed, so the turn can be shown as an error. */
   error?: string
+  /** True while tokens are streaming in from the backend. */
+  streaming?: boolean
 }
 
 export interface ChatThread {

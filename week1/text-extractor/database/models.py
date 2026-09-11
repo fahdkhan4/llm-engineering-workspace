@@ -220,6 +220,8 @@ class ChatMessage(Base):
     content: Mapped[str] = mapped_column(Text)
     # Chunk ids / page numbers the answer was grounded on.
     sources: Mapped[list] = mapped_column(JSON, default=list)
+    # Token count for this message turn (for session spend tracking)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     session: Mapped[ChatSession] = relationship(back_populates="messages")

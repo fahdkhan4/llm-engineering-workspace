@@ -28,5 +28,7 @@ class AnswerResponse(BaseModel):
     session_key: str
     sources: list[SourceRef] = Field(default_factory=list)
     model: str | None = None
+    # Token usage metadata from the LLM (prompt_tokens, completion_tokens, etc.)
+    usage: dict | None = None
     # False while llm/llm_client.py is still the stub.
     llm_configured: bool = True
