@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 import numpy as np
@@ -32,6 +33,10 @@ _QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 # The provider is called over the network, so texts go up in batches.
 _BATCH_SIZE = 32
 _TIMEOUT_SECONDS = 60
+# Batches are network-bound, not CPU-bound, so they overlap. A 500-chunk
+# document is 16 round trips: sequentially that is ~25s of an upload spent
+# waiting. Kept modest to stay under the provider's rate limit.
+_MAX_PARALLEL_BATCHES = 6
 
 
 class _Unavailable(RuntimeError):
@@ -130,31 +135,68 @@ def _embed(texts: list[str]) -> np.ndarray | None:
     return _normalise(raw)
 
 
-def embed_documents(texts: list[str]) -> list[np.ndarray] | None:
-    """Embed chunk texts. Returns one vector per input, or None if unavailable.
+def _settled(future) -> np.ndarray | None:
+    """A worker's result, turning an unexpected raise into a failed batch."""
+    try:
+        return future.result()
+    except Exception:  # `_embed` should never raise, but must not take the rest
+        logger.warning("Embedding batch raised unexpectedly.", exc_info=True)
+        return None
 
-    A partial failure returns None for the whole call rather than a ragged
-    result: the caller stores NULL embeddings and the backfill script repairs
-    them later.
+
+def embed_documents(texts: list[str]) -> list[np.ndarray | None] | None:
+    """Embed chunk texts. One entry per input, None where that batch failed.
+
+    Returns None only when embeddings are unavailable altogether - no token,
+    disabled, missing package - because then there is nothing to salvage.
+
+    A single failed batch used to discard every other batch in the call, so one
+    bad request cost a 500-chunk document all 16 batches it had just paid for
+    and left it keyword-only. Now only the failed slice comes back empty, and
+    scripts.backfill_embeddings repairs those rows.
     """
     if not texts:
         return []
+    if not is_available():
+        return None
 
-    vectors: list[np.ndarray] = []
-    for start in range(0, len(texts), _BATCH_SIZE):
-        batch = texts[start : start + _BATCH_SIZE]
-        matrix = _embed(batch)
+    batches = [
+        texts[start : start + _BATCH_SIZE]
+        for start in range(0, len(texts), _BATCH_SIZE)
+    ]
+
+    workers = min(_MAX_PARALLEL_BATCHES, len(batches))
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_embed, batch) for batch in batches]
+            # Resolved one by one, not via `map`: `map` re-raises the first
+            # exception and throws away every batch that did succeed, which is
+            # the failure mode this function exists to avoid.
+            matrices = [_settled(future) for future in futures]
+    else:
+        matrices = [_embed(batch) for batch in batches]
+
+    vectors: list[np.ndarray | None] = []
+    for batch, matrix in zip(batches, matrices):
         if matrix is None or len(matrix) != len(batch):
             if matrix is not None:
                 logger.warning(
-                    "Provider returned %d vectors for %d texts - discarding batch.",
+                    "Provider returned %d vectors for %d texts - dropping batch.",
                     len(matrix),
                     len(batch),
                 )
-            return None
-        vectors.extend(matrix)
+            vectors.extend([None] * len(batch))
+        else:
+            vectors.extend(matrix)
 
-    logger.info("Embedded %d chunk(s) with %s.", len(vectors), settings.embedding_model)
+    embedded = sum(1 for vector in vectors if vector is not None)
+    logger.info(
+        "Embedded %d/%d chunk(s) with %s in %d batch(es).",
+        embedded,
+        len(vectors),
+        settings.embedding_model,
+        len(batches),
+    )
     return vectors
 
 

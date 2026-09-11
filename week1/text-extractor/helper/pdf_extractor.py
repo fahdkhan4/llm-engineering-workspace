@@ -48,18 +48,37 @@ _PARTIAL_RULE_SETTINGS = (
     {"vertical_strategy": "text", "horizontal_strategy": "lines"},
 )
 
+# Pre-filter thresholds for `_has_table_rules`.
+# Rules on one axis are enough, because the partial strategies above need only
+# one. Two is the floor a genuine table can reach - a two-column table ruled
+# down the columns alone - so raising this trades tables for seconds. Measured
+# on a 340-page book: 2 admits 100 pages and finds every table, 5 admits 33 and
+# loses one.
+_MIN_RULES = 2
+# A segment thinner than this is a rule; thicker on both axes makes it a box.
+_RULE_TOLERANCE = 2.0
+# A box this close to the page size is a background panel, not a table cell.
+_FULL_PAGE_RATIO = 0.95
+
 
 def extract_pdf(data: bytes) -> ExtractedDocument:
     """Extract text, structure, tables and metadata from PDF bytes."""
-    tables_by_page = _extract_tables(data)
-
     with pymupdf.open(stream=data, filetype="pdf") as doc:
         if doc.needs_pass:
             raise ValueError("The PDF is password protected and cannot be read.")
 
-        pages = [_page_blocks(page) for page in doc]
+        # One pass: the text of every page, and which pages could hold a table.
+        pages = []
+        ruled_pages: set[int] = set()
+        for page_no, page in enumerate(doc, start=1):
+            pages.append(_page_blocks(page))
+            if _has_table_rules(page):
+                ruled_pages.add(page_no)
+
         metadata = _metadata(doc)
         page_count = doc.page_count
+
+    tables_by_page = _extract_tables(data, ruled_pages)
 
     body_size = _body_font_size(pages)
     repeated = _repeated_margin_texts(pages)
@@ -123,12 +142,19 @@ def extract_pdf(data: bytes) -> ExtractedDocument:
 # --------------------------------------------------------------------------- #
 
 
-def _extract_tables(data: bytes) -> dict[int, list[tuple[tuple, list[list[str]]]]]:
-    """Return {page_number: [(bbox, rows), ...]}."""
+def _extract_tables(
+    data: bytes, pages: set[int]
+) -> dict[int, list[tuple[tuple, list[list[str]]]]]:
+    """Return {page_number: [(bbox, rows), ...]} for the given pages only."""
     found: dict[int, list[tuple[tuple, list[list[str]]]]] = {}
+    if not pages:
+        return found
+
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             for page_no, page in enumerate(pdf.pages, start=1):
+                if page_no not in pages:
+                    continue  # no ruling lines: nothing here to find
                 tables = _page_tables(page)
                 if tables:
                     found[page_no] = tables
@@ -136,6 +162,65 @@ def _extract_tables(data: bytes) -> dict[int, list[tuple[tuple, list[list[str]]]
     except Exception:
         logger.warning("Table detection failed; continuing with text only.", exc_info=True)
     return found
+
+
+def _rule_contribution(item, width: float, height: float) -> tuple[int, int]:
+    """How many horizontal / vertical rules one drawing item is worth."""
+    op = item[0]
+    if op == "l":  # line: two points
+        (x0, y0), (x1, y1) = item[1], item[2]
+    elif op == "re":  # rectangle: (x0, y0, x1, y1)
+        x0, y0, x1, y1 = item[1]
+        if abs(x1 - x0) > _RULE_TOLERANCE and abs(y1 - y0) > _RULE_TOLERANCE:
+            # A closed box is two rules per axis, unless it covers the page -
+            # then it is a background panel and says nothing about tables.
+            if (
+                abs(x1 - x0) < width * _FULL_PAGE_RATIO
+                or abs(y1 - y0) < height * _FULL_PAGE_RATIO
+            ):
+                return 2, 2
+            return 0, 0
+    else:  # curves and quads are never table rules
+        return 0, 0
+
+    if abs(y1 - y0) <= _RULE_TOLERANCE < abs(x1 - x0):
+        return 1, 0
+    if abs(x1 - x0) <= _RULE_TOLERANCE < abs(y1 - y0):
+        return 0, 1
+    return 0, 0
+
+
+def _has_table_rules(page) -> bool:
+    """Whether this page is worth handing to pdfplumber.
+
+    pdfplumber reads every character on a page to find tables - around 120ms
+    each, which is most of a minute on a long document that has almost no
+    tables. Vector drawings are two orders of magnitude cheaper to read, and
+    every strategy in `_page_tables` keys off ruling lines, so a page without
+    them cannot yield a table however long we look at it.
+
+    Deliberately generous: it errs towards saying yes, because a false yes only
+    costs time while a false no silently loses a table.
+    """
+    try:
+        paths = page.get_cdrawings()  # dicts, not Point/Rect objects: faster
+    except Exception:
+        return True  # unreadable drawings: let pdfplumber decide
+
+    horizontal = vertical = 0
+    width, height = page.rect.width, page.rect.height
+
+    for path in paths:
+        for item in path.get("items", ()):
+            try:
+                added_h, added_v = _rule_contribution(item, width, height)
+            except (TypeError, ValueError, IndexError):
+                continue  # an item shape we do not recognise
+            horizontal += added_h
+            vertical += added_v
+            if horizontal >= _MIN_RULES or vertical >= _MIN_RULES:
+                return True
+    return False
 
 
 def _page_tables(page) -> list[tuple[tuple, list[list[str]]]]:

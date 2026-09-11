@@ -200,15 +200,21 @@ def save_extraction(
         )
         for table in extracted.tables
     )
-    # One batched call. A failure yields no vectors, so the document still
-    # ingests and stays keyword-searchable; scripts.backfill_embeddings repairs it.
+    # Batched, and tolerant per batch: whatever fails comes back as None, so a
+    # bad request costs those chunks only. The document still ingests and stays
+    # keyword-searchable; scripts.backfill_embeddings repairs the gaps.
     vectors = embedder.embed_documents([chunk.content for chunk in chunks])
     if vectors is None:
+        vectors = [None] * len(chunks)
+
+    missing = sum(1 for vector in vectors if vector is None)
+    if missing:
         logger.warning(
-            "No embeddings stored for %s - semantic search will skip its %d chunk(s) "
-            "until 'python -m scripts.backfill_embeddings' is run.",
-            document.filename,
+            "%d of %d chunk(s) of %s have no embedding - semantic search will skip "
+            "them until 'python -m scripts.backfill_embeddings' is run.",
+            missing,
             len(chunks),
+            document.filename,
         )
 
     db.add_all(
@@ -221,7 +227,9 @@ def save_extraction(
             page_end=chunk.page_end,
             char_count=chunk.char_count,
             token_estimate=chunk.token_estimate,
-            embedding=_encode_vector(vectors[index]) if vectors else None,
+            embedding=(
+                _encode_vector(vectors[index]) if vectors[index] is not None else None
+            ),
         )
         for index, chunk in enumerate(chunks)
     )
@@ -338,17 +346,25 @@ def chunks_missing_embeddings(
 
 
 def store_embeddings(db: Session, pairs: list[tuple[int, object]]) -> int:
-    """Write vectors back for the given chunk ids. Returns how many were saved."""
-    if not pairs:
-        return 0
+    """Write vectors back for the given chunk ids. Returns how many were saved.
+
+    Pairs whose vector is None are skipped: a batch the provider could not
+    embed leaves the existing value alone rather than nulling it.
+    """
+    written = 0
     for chunk_id, vector in pairs:
+        if vector is None:
+            continue
         db.execute(
             DocumentChunk.__table__.update()
             .where(DocumentChunk.id == chunk_id)
             .values(embedding=_encode_vector(vector))
         )
-    db.commit()
-    return len(pairs)
+        written += 1
+
+    if written:
+        db.commit()
+    return written
 
 
 # --------------------------------------------------------------------------- #

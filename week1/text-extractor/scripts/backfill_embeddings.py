@@ -40,11 +40,14 @@ def _backfill_embeddings(db, batch_size: int, force: bool) -> int:
         window = chunks[start : start + batch_size]
         vectors = embedder.embed_documents([chunk.content for chunk in window])
         if vectors is None:
-            print(f"  ! batch at offset {start} failed - stopping.")
+            # Unavailable, not merely failing: every later window would too.
+            print(f"  ! embeddings became unavailable at offset {start} - stopping.")
             break
+
         saved += repository.store_embeddings(
             db, list(zip((chunk.id for chunk in window), vectors))
         )
+        # A window can be partly empty; the next run picks those rows up again.
         print(f"  {saved}/{len(chunks)}")
     return saved
 

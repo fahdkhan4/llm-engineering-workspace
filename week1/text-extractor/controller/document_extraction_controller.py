@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -37,7 +38,13 @@ async def _extract_document_details(
     data = await _read_upload(file)
 
     try:
-        document, counts, already_processed = ingest(db, file.filename or "document", data)
+        # `ingest` is fully synchronous - PDF parsing plus embedding and summary
+        # calls, tens of seconds on a long document. Awaiting it on the event
+        # loop froze every other request for the duration, health checks and
+        # chat included, so it runs on a worker thread instead.
+        document, counts, already_processed = await run_in_threadpool(
+            ingest, db, file.filename or "document", data
+        )
     except EmptyUpload as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     except UnsupportedFileType as exc:

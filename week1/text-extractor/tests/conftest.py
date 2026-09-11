@@ -105,3 +105,55 @@ def build_docx(path: Path) -> bytes:
     )
     doc.save(path)
     return path.read_bytes()
+
+
+def build_pdf(path: Path) -> bytes:
+    """A two page PDF: page 1 is prose with no drawings, page 2 a ruled table.
+
+    The split is the point. Table detection only visits pages that carry
+    ruling lines, so a fixture needs one page of each to show both that the
+    prose page is skipped and that the table page is still read.
+    """
+    import pymupdf
+
+    doc = pymupdf.open()
+
+    page = doc.new_page()
+    y = 90
+    for line in (
+        "Phase 1 - Foundations",
+        "Latency and throughput, the client server model, and how DNS",
+        "resolves a hostname before any request is sent to the origin.",
+        "Sharding splits a table across machines by a partition key.",
+    ):
+        page.insert_text((72, y), line, fontsize=11)
+        y += 18
+
+    page = doc.new_page()
+    left, top, width, height, rows, cols = 72, 90, 360, 60, 3, 3
+    for row in range(rows + 1):
+        page.draw_line(
+            pymupdf.Point(left, top + row * height),
+            pymupdf.Point(left + width, top + row * height),
+        )
+    for col in range(cols + 1):
+        page.draw_line(
+            pymupdf.Point(left + col * width / cols, top),
+            pymupdf.Point(left + col * width / cols, top + rows * height),
+        )
+    cells = [
+        ["Region", "Replicas", "Latency"],
+        ["us-east", "3", "12ms"],
+        ["eu-west", "2", "28ms"],
+    ]
+    for row, values in enumerate(cells):
+        for col, value in enumerate(values):
+            page.insert_text(
+                (left + col * width / cols + 8, top + row * height + 22),
+                value,
+                fontsize=10,
+            )
+
+    doc.save(path)
+    doc.close()
+    return path.read_bytes()
