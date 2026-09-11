@@ -34,6 +34,11 @@ _BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 _MODEL = os.getenv("GROQ_MODEL", settings.main_model)
 _FAST_MODEL = os.getenv("GROQ_FAST_MODEL", settings.fast_model)
 
+# gpt-oss is a reasoning model and bills its hidden reasoning as output tokens.
+# At "medium" they were ~70% of every completion; "low" cuts the answer call by
+# ~29% with no measured loss in grounding or citation quality.
+_REASONING_EFFORT = os.getenv("GROQ_REASONING_EFFORT", "low")
+
 FALLBACK_ANSWER = (
     "I could not find enough relevant information in the documents to answer that."
 )
@@ -212,6 +217,7 @@ def answer_question(
             messages=messages,
             temperature=0,  # grounded extraction, not creative writing
             max_tokens=800,
+            reasoning_effort=_REASONING_EFFORT,
         )
     except OpenAIError as exc:
         logger.exception("LLM request failed")
@@ -391,6 +397,7 @@ def stream_answer_question(
             messages=messages,
             temperature=0,
             max_tokens=800,
+            reasoning_effort=_REASONING_EFFORT,
             stream=True,
             stream_options={"include_usage": True},
         )

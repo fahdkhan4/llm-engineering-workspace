@@ -54,8 +54,13 @@ def add_message(
     return message
 
 
-def recent_messages(db: Session, session: ChatSession, limit: int = 10) -> list[ChatMessage]:
-    """Last `limit` turns, oldest first - ready to pass to the LLM as history."""
+def recent_messages(db: Session, session: ChatSession, limit: int = 6) -> list[ChatMessage]:
+    """Last `limit` messages, oldest first - ready to pass to the LLM as history.
+
+    History is resent in full on every turn, so it is priced per question. Six
+    messages (three exchanges) is enough to resolve "it" and "more detail",
+    which is all the answer prompt is allowed to use history for.
+    """
     rows = db.scalars(
         select(ChatMessage)
         .where(ChatMessage.session_id == session.id)

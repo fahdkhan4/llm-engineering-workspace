@@ -324,19 +324,21 @@ class TestMaxTokensSet:
         with _patch_client(fake):
             rewrite_query("Tell me more", history)
 
+        from llm.llm_client import _FAST_MODEL, _MODEL
+
         used_model = fake.calls[0].get("model", "")
         # Should use the fast model, not the main model
-        assert used_model != "openai/gpt-oss-120b" or used_model == "llama-3.1-8b-instant"
+        assert used_model == _FAST_MODEL != _MODEL
 
     def test_summary_uses_fast_model(self):
-        from llm.llm_client import summarise_document
+        from llm.llm_client import _FAST_MODEL, _MODEL, summarise_document
 
         fake = _FakeClient([_make_response(content="This document is an overview.")])
         with _patch_client(fake):
             summarise_document("Sample document text for summarisation.")
 
         used_model = fake.calls[0].get("model", "")
-        assert used_model == "llama-3.1-8b-instant"
+        assert used_model == _FAST_MODEL != _MODEL
 
 
 # --------------------------------------------------------------------------- #

@@ -51,8 +51,10 @@ class Settings(BaseSettings):
     # LLM model tiering
     # Flagship model for answer generation (grounded QA)
     main_model: str = "openai/gpt-oss-120b"
-    # Lightweight model for rewrites, summaries and other simple tasks
-    fast_model: str = "llama-3.1-8b-instant"
+    # Lightweight model for rewrites, summaries and other simple tasks.
+    # Not used for answers: the 20b tier drops citations and invents detail,
+    # which the grounded-answer prompt cannot tolerate.
+    fast_model: str = "openai/gpt-oss-20b"
     # Hard session limits
     max_session_turns: int = 30
     max_session_tokens: int = 50_000
