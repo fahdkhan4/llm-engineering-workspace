@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 
-import { askQuestion } from '@/services/qa'
+import { askQuestion, askQuestionStream } from '@/services/qa'
 import { ApiError } from '@/services/http'
 import type { ChatMessage, ChatThread } from '@/types/chat'
 import { truncate } from '@/utils/format'
